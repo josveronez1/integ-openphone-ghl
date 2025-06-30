@@ -1,4 +1,4 @@
-// server.js - v4.0 Final com Dashboard Inteligente e Calendário
+// server.js - v5.0 Final com Páginas de Relatório Dedicadas por Cliente
 const express = require('express');
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
@@ -87,31 +87,29 @@ app.post('/openphone-webhook', async (req, res) => {
     }
 });
 
-
-// --- LÓGICA DE GERAÇÃO DE DADOS PARA O RELATÓRIO (Refatorada) ---
+// --- LÓGICA DE GERAÇÃO DE DADOS PARA O RELATÓRIO (sem alterações) ---
 async function getReportData(period, date, accountId = null) {
     const periodMap = { daily: 'day', weekly: 'week', monthly: 'month' };
     const sqlIntervalUnit = periodMap[period];
     if (!sqlIntervalUnit) throw new Error('Período inválido.');
-
-    let callsQuery = `
+    const callsQuery = `
         SELECT * FROM calls
         WHERE call_time::date >= date_trunc('${sqlIntervalUnit}', $1::date)
           AND call_time::date < date_trunc('${sqlIntervalUnit}', $1::date) + '1 ${sqlIntervalUnit}'::interval;
     `;
     const { rows: allCalls } = await pool.query(callsQuery, [date]);
-
     let filteredCalls = allCalls;
-    let reportTitle = `Call Report (${period})`;
+    let accountName = 'All Accounts';
     if (accountId) {
         const tenantsForAccount = TENANT_CONFIG.filter(t => t.id === accountId);
         if (tenantsForAccount.length > 0) {
             const ghlApiKeysForAccount = tenantsForAccount.map(t => t.ghlApiKey);
             filteredCalls = allCalls.filter(c => ghlApiKeysForAccount.includes(c.ghl_api_key));
-            reportTitle = `${tenantsForAccount[0].name} - Call Report (${period})`;
+            accountName = tenantsForAccount[0].name;
+        } else {
+            filteredCalls = []; // Se o ID da conta não for encontrado, não mostre nenhum dado
         }
     }
-
     const reportData = {};
     for (const call of filteredCalls) {
         const tenant = TENANT_CONFIG.find(t => t.ghlApiKey === call.ghl_api_key);
@@ -125,7 +123,6 @@ async function getReportData(period, date, accountId = null) {
             reportData[tenant.name][call.phone_number_from].answeredCalls++;
         }
     }
-
     const uniqueContacts = [...new Set(filteredCalls.map(c => c.contact_id))];
     for (const contactId of uniqueContacts) {
         const callForContact = filteredCalls.find(c => c.contact_id === contactId);
@@ -143,33 +140,15 @@ async function getReportData(period, date, accountId = null) {
             }
         }
     }
-    return { reportData, reportTitle };
+    return { reportData, accountName };
 }
 
-
-// --- GERAÇÃO DE HTML (Refatorada) ---
+// --- GERAÇÃO DE HTML (sem alterações) ---
 function generateHtmlShell(pageTitle, content) {
     return `
         <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${pageTitle}</title>
-        <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; }
-            .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
-            h1, h3 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
-            h2 { color: #34495e; background-color: #ecf0f1; padding: 12px; border-radius: 5px; margin-top: 40px; }
-            .report-block { margin-bottom: 40px; }
-            .report-section { margin-top: 20px; border: 1px solid #ddd; border-radius: 5px; padding: 20px; }
-            .phone-number { font-weight: bold; font-size: 1.1em; color: #2980b9; }
-            ul { list-style-type: none; padding-left: 0; }
-            li { background-color: #fdfdfd; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
-            .metric-label { font-weight: 500; }
-            .metric-value { font-weight: bold; font-size: 1.2em; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 20px; }
-            .date-picker-container { margin: 20px 0; padding: 15px; background: #e8f0fe; border: 1px solid #d6e3f4; border-radius: 5px; text-align: center; }
-            .date-picker-container label { font-weight: bold; margin-right: 10px; }
-            input[type="date"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; }
-        </style></head><body><div class="container">${content}</div></body></html>
-    `;
+        <style> body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; } .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); } h1, h3 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; } h2 { color: #34495e; background-color: #ecf0f1; padding: 12px; border-radius: 5px; margin-top: 40px; } .report-block { margin-bottom: 40px; } .report-section { margin-top: 20px; border: 1px solid #ddd; border-radius: 5px; padding: 20px; } .phone-number { font-weight: bold; font-size: 1.1em; color: #2980b9; } ul { list-style-type: none; padding-left: 0; } li { background-color: #fdfdfd; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; } .metric-label { font-weight: 500; } .metric-value { font-weight: bold; font-size: 1.2em; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 20px; } .date-picker-container { margin: 20px 0; padding: 15px; background: #e8f0fe; border: 1px solid #d6e3f4; border-radius: 5px; text-align: center; } .date-picker-container label { font-weight: bold; margin-right: 10px; } input[type="date"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; } </style></head><body><div class="container">${content}</div></body></html>`;
 }
-
 function generateReportBlockHtml(reportData) {
     let blockHtml = '';
     if (Object.keys(reportData).length === 0) {
@@ -178,7 +157,7 @@ function generateReportBlockHtml(reportData) {
         for (const accountName in reportData) {
             blockHtml += `<h2>${accountName}</h2>`;
             for (const phoneNumber in reportData[accountName]) {
-                const stats = reportData[accountName][phoneNumber];
+                const stats = data[accountName][phoneNumber];
                 blockHtml += `<div class="report-section"><p class="phone-number">Phone Number: ${phoneNumber}</p><ul>
                     <li><span class="metric-label">Total Calls Made:</span> <span class="metric-value">${stats.totalCalls}</span></li>
                     <li><span class="metric-label">Answered Calls:</span> <span class="metric-value">${stats.answeredCalls}</span></li>
@@ -191,17 +170,31 @@ function generateReportBlockHtml(reportData) {
 }
 
 
-// --- NOVOS ENDPOINTS DO DASHBOARD ---
-app.get('/dashboard', async (req, res) => {
+// ================== INÍCIO DA ATUALIZAÇÃO ==================
+
+// --- NOVAS ROTAS DEDICADAS POR CLIENTE ---
+
+// Rota para o dashboard de um cliente específico (ex: /mondia)
+app.get('/:accountId', (req, res) => {
+    const { accountId } = req.params;
+    // Redireciona de /mondia para /mondia/dashboard para manter a lógica
+    res.redirect(`/${accountId}/dashboard`);
+});
+
+// Rota para o dashboard principal de um cliente
+app.get('/:accountId/dashboard', async (req, res) => {
     try {
+        const { accountId } = req.params;
+        const tenantInfo = TENANT_CONFIG.find(t => t.id === accountId);
+        if (!tenantInfo) return res.status(404).send('Account not found.');
+
         const today = new Date().toISOString().split('T')[0];
-        const accountId = req.query.account;
 
         const daily = await getReportData('daily', today, accountId);
         const weekly = await getReportData('weekly', today, accountId);
         const monthly = await getReportData('monthly', today, accountId);
         
-        const pageTitle = accountId ? `${TENANT_CONFIG.find(t=>t.id===accountId).name} - Dashboard` : 'Call Report Dashboard';
+        const pageTitle = `${tenantInfo.name} - Dashboard`;
 
         let htmlContent = `
             <h1>${pageTitle}</h1>
@@ -210,18 +203,13 @@ app.get('/dashboard', async (req, res) => {
                 <input type="date" id="report-date">
             </div>
             <div class="report-block"><h3>Today's Report</h3>${generateReportBlockHtml(daily.reportData)}</div>
-            <div class="report-block"><h3>This Week's Report</h3>${generateReportBlockHtml(weekly.reportData)}</div>
+            <div class.report-block"><h3>This Week's Report</h3>${generateReportBlockHtml(weekly.reportData)}</div>
             <div class="report-block"><h3>This Month's Report</h3>${generateReportBlockHtml(monthly.reportData)}</div>
             <script>
                 document.getElementById('report-date').addEventListener('change', function() {
                     if (this.value) {
-                        const baseUrl = window.location.origin + '/reports';
-                        const params = new URLSearchParams({ period: 'daily', date: this.value });
-                        const currentAccountId = new URLSearchParams(window.location.search).get('account');
-                        if (currentAccountId) {
-                            params.append('account', currentAccountId);
-                        }
-                        window.location.href = baseUrl + '?' + params.toString();
+                        // Constrói a URL para o relatório diário específico do cliente
+                        window.location.href = '/${accountId}/reports?period=daily&date=' + this.value;
                     }
                 });
             </script>
@@ -232,17 +220,19 @@ app.get('/dashboard', async (req, res) => {
     }
 });
 
-app.get('/reports', async (req, res) => {
+// Rota para o relatório de data específica de um cliente
+app.get('/:accountId/reports', async (req, res) => {
     try {
-        const { period, date, account: accountId } = req.query;
+        const { accountId } = req.params;
+        const { period, date } = req.query;
         if (!period || !date) return res.status(400).send('Parameters "period" and "date" are required.');
 
-        const { reportData, reportTitle } = await getReportData(period, date, accountId);
-        const pageTitle = `${reportTitle} for ${date}`;
+        const { reportData, accountName } = await getReportData(period, date, accountId);
+        const pageTitle = `${accountName} - Report for ${date}`;
         
         let htmlContent = `
             <h1>${pageTitle}</h1>
-            <p><a href="/dashboard${accountId ? '?account='+accountId : ''}">&larr; Back to Dashboard</a></p>
+            <p><a href="/${accountId}/dashboard">&larr; Back to ${accountName} Dashboard</a></p>
             ${generateReportBlockHtml(reportData)}
         `;
         res.send(generateHtmlShell(pageTitle, htmlContent));
@@ -251,10 +241,19 @@ app.get('/reports', async (req, res) => {
     }
 });
 
-// Redireciona a raiz para o novo dashboard
+
+// A rota raiz agora é apenas uma página de boas-vindas
 app.get('/', (req, res) => {
-    res.redirect('/dashboard');
+    const reportLinks = TENANT_CONFIG.map(t => `<li><a href="/${t.id}">${t.name} Dashboard</a></li>`).filter((v, i, a) => a.indexOf(v) === i);
+    let htmlContent = `
+        <h1>Reporting Server</h1>
+        <p>Please select a client dashboard to view:</p>
+        <ul>${reportLinks.join('')}</ul>
+    `;
+    res.send(generateHtmlShell('Report Server', htmlContent));
 });
+
+// =================== FIM DA ATUALIZAÇÃO ===================
 
 
 // --- INICIALIZAÇÃO ---
