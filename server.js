@@ -1,4 +1,4 @@
-// server.js - v3.2 com Lógica de Chamadas Totais Corrigida
+// server.js - v3.3 Final - Criação de Notas e Relatórios
 const express = require('express');
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
@@ -43,8 +43,6 @@ TENANT_CONFIG.forEach(tenant => {
 
 app.use(express.json());
 
-// ================== INÍCIO DA CORREÇÃO ==================
-// O endpoint agora processa DOIS tipos de evento: call.completed e call.recording.completed
 app.post('/openphone-webhook', async (req, res) => {
     const eventType = req.body.type;
     const callData = req.body.data?.object;
@@ -53,7 +51,6 @@ app.post('/openphone-webhook', async (req, res) => {
         return res.status(200).send('Webhook ignored (no call data).');
     }
 
-    // --- Roteamento (feito para ambos os eventos) ---
     let userOpenPhoneNumber, apiKeyForThisCall;
     if (GHL_API_KEY_MAP[callData.from]) {
         userOpenPhoneNumber = callData.from;
@@ -65,21 +62,16 @@ app.post('/openphone-webhook', async (req, res) => {
     if (!apiKeyForThisCall) return res.status(200).send('Roteamento falhou.');
     
     try {
-        // --- LÓGICA PARA O EVENTO 'call.completed' (TODAS AS CHAMADAS) ---
-        if (eventType === 'call.completed') {
-            console.log(`Processando evento call.completed para a chamada ${callData.id}`);
-            
-            const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
-            const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(`+${contactPhoneNumber.replace(/\D/g, '')}`)}`, {
-                headers: { 'Authorization': `Bearer ${apiKeyForThisCall}` }
-            });
-            const searchData = await searchResponse.json();
-            if (searchData.contacts.length === 0) return res.status(200).send('Contato não encontrado no GHL.');
-            
-            const contactId = searchData.contacts[0].id;
+        const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
+        const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(`+${contactPhoneNumber.replace(/\D/g, '')}`)}`, {
+            headers: { 'Authorization': `Bearer ${apiKeyForThisCall}` }
+        });
+        const searchData = await searchResponse.json();
+        if (searchData.contacts.length === 0) return res.status(200).send('Contato não encontrado no GHL.');
+        
+        const contactId = searchData.contacts[0].id;
 
-            // Insere a chamada no banco de dados. Se ela já existir, não faz nada.
-            // Isso garante que cada chamada seja contada apenas uma vez.
+        if (eventType === 'call.completed') {
             const insertQuery = `
                 INSERT INTO calls (call_id, contact_id, ghl_api_key, phone_number_from, call_time, was_answered)
                 VALUES ($1, $2, $3, $4, $5, $6)
@@ -92,15 +84,27 @@ app.post('/openphone-webhook', async (req, res) => {
             console.log(`Chamada ${callData.id} (call.completed) inserida/verificada no banco de dados.`);
             return res.status(200).send('Evento call.completed processado.');
 
-        // --- LÓGICA PARA O EVENTO 'call.recording.completed' (CHAMADAS COM GRAVAÇÃO) ---
         } else if (eventType === 'call.recording.completed') {
-            console.log(`Processando evento call.recording.completed para a chamada ${callData.id}`);
-
             const mediaData = callData.media && callData.media.length > 0 ? callData.media[0] : {};
             const duration = mediaData.duration || 0;
             const recordingUrl = mediaData.url || null;
 
-            // Atualiza a chamada que já existe com os detalhes da gravação.
+            // ================== INÍCIO DA CORREÇÃO ==================
+            // PASSO 1: Criar a nota no GHL (a parte que estava faltando)
+            const noteBody = `Call Completed via OpenPhone.\n\nDuration: ${Math.round(duration)} seconds.\nRecording: ${recordingUrl || 'N/A'}`;
+            await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}/notes`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKeyForThisCall}`,
+                    'Content-Type': 'application/json',
+                    'Version': '2021-07-28'
+                },
+                body: JSON.stringify({ body: noteBody })
+            });
+            console.log(`Nota da chamada ${callData.id} criada no GHL para o contato ${contactId}.`);
+            // =================== FIM DA CORREÇÃO ====================
+
+            // PASSO 2: Atualizar o registro no nosso banco de dados
             const updateQuery = `
                 UPDATE calls
                 SET duration = $1, recording_url = $2, was_answered = true
@@ -109,10 +113,9 @@ app.post('/openphone-webhook', async (req, res) => {
             const values = [duration, recordingUrl, callData.id];
             await pool.query(updateQuery, values);
             console.log(`Gravação da chamada ${callData.id} atualizada no banco de dados.`);
-            return res.status(200).send('Evento call.recording.completed processado.');
+            return res.status(200).send('Evento call.recording.completed processado e nota criada.');
         }
 
-        // Se não for nenhum dos eventos que nos interessam
         res.status(200).send(`Webhook do tipo ${eventType} ignorado.`);
 
     } catch (error) {
@@ -120,8 +123,6 @@ app.post('/openphone-webhook', async (req, res) => {
         res.status(500).send('Erro interno.');
     }
 });
-// =================== FIM DA CORREÇÃO ===================
-
 
 // O endpoint de relatórios não precisa de nenhuma alteração
 app.get('/reports', async (req, res) => {
@@ -251,7 +252,7 @@ function generateReportHtml(data, period, date) {
     return html;
 }
 
-app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.2 - Corrected Logic) is running!'));
+app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.3 - Final) is running!'));
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
     initializeDatabase();
