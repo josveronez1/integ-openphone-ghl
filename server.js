@@ -1,4 +1,4 @@
-// server.js - v3.1 com Relatórios HTML em Inglês
+// server.js - v3.2 com Lógica de Chamadas Totais Corrigida
 const express = require('express');
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
@@ -43,14 +43,17 @@ TENANT_CONFIG.forEach(tenant => {
 
 app.use(express.json());
 
+// ================== INÍCIO DA CORREÇÃO ==================
+// O endpoint agora processa DOIS tipos de evento: call.completed e call.recording.completed
 app.post('/openphone-webhook', async (req, res) => {
     const eventType = req.body.type;
     const callData = req.body.data?.object;
 
-    if (eventType !== 'call.recording.completed' || !callData) {
-        return res.status(200).send('Webhook ignorado.');
+    if (!callData || !callData.id) {
+        return res.status(200).send('Webhook ignored (no call data).');
     }
 
+    // --- Roteamento (feito para ambos os eventos) ---
     let userOpenPhoneNumber, apiKeyForThisCall;
     if (GHL_API_KEY_MAP[callData.from]) {
         userOpenPhoneNumber = callData.from;
@@ -59,39 +62,68 @@ app.post('/openphone-webhook', async (req, res) => {
         userOpenPhoneNumber = callData.to;
         apiKeyForThisCall = GHL_API_KEY_MAP[callData.to];
     }
-
     if (!apiKeyForThisCall) return res.status(200).send('Roteamento falhou.');
     
     try {
-        const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
-        const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(`+${contactPhoneNumber.replace(/\D/g, '')}`)}`, {
-            headers: { 'Authorization': `Bearer ${apiKeyForThisCall}` }
-        });
-        const searchData = await searchResponse.json();
-        if (searchData.contacts.length === 0) return res.status(200).send('Contato não encontrado no GHL.');
-        
-        const contactId = searchData.contacts[0].id;
-        const mediaData = callData.media && callData.media.length > 0 ? callData.media[0] : {};
-        
-        const insertQuery = `
-            INSERT INTO calls (call_id, contact_id, ghl_api_key, phone_number_from, call_time, duration, was_answered, recording_url)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (call_id) DO NOTHING;
-        `;
-        const values = [
-            callData.id, contactId, apiKeyForThisCall, userOpenPhoneNumber, callData.createdAt,
-            mediaData.duration || 0, !!callData.answeredAt, mediaData.url || null
-        ];
-        await pool.query(insertQuery, values);
-        console.log(`Chamada ${callData.id} salva no banco de dados.`);
-        res.status(200).send('Chamada processada e salva.');
+        // --- LÓGICA PARA O EVENTO 'call.completed' (TODAS AS CHAMADAS) ---
+        if (eventType === 'call.completed') {
+            console.log(`Processando evento call.completed para a chamada ${callData.id}`);
+            
+            const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
+            const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(`+${contactPhoneNumber.replace(/\D/g, '')}`)}`, {
+                headers: { 'Authorization': `Bearer ${apiKeyForThisCall}` }
+            });
+            const searchData = await searchResponse.json();
+            if (searchData.contacts.length === 0) return res.status(200).send('Contato não encontrado no GHL.');
+            
+            const contactId = searchData.contacts[0].id;
+
+            // Insere a chamada no banco de dados. Se ela já existir, não faz nada.
+            // Isso garante que cada chamada seja contada apenas uma vez.
+            const insertQuery = `
+                INSERT INTO calls (call_id, contact_id, ghl_api_key, phone_number_from, call_time, was_answered)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (call_id) DO NOTHING;
+            `;
+            const values = [
+                callData.id, contactId, apiKeyForThisCall, userOpenPhoneNumber, callData.createdAt, !!callData.answeredAt
+            ];
+            await pool.query(insertQuery, values);
+            console.log(`Chamada ${callData.id} (call.completed) inserida/verificada no banco de dados.`);
+            return res.status(200).send('Evento call.completed processado.');
+
+        // --- LÓGICA PARA O EVENTO 'call.recording.completed' (CHAMADAS COM GRAVAÇÃO) ---
+        } else if (eventType === 'call.recording.completed') {
+            console.log(`Processando evento call.recording.completed para a chamada ${callData.id}`);
+
+            const mediaData = callData.media && callData.media.length > 0 ? callData.media[0] : {};
+            const duration = mediaData.duration || 0;
+            const recordingUrl = mediaData.url || null;
+
+            // Atualiza a chamada que já existe com os detalhes da gravação.
+            const updateQuery = `
+                UPDATE calls
+                SET duration = $1, recording_url = $2, was_answered = true
+                WHERE call_id = $3;
+            `;
+            const values = [duration, recordingUrl, callData.id];
+            await pool.query(updateQuery, values);
+            console.log(`Gravação da chamada ${callData.id} atualizada no banco de dados.`);
+            return res.status(200).send('Evento call.recording.completed processado.');
+        }
+
+        // Se não for nenhum dos eventos que nos interessam
+        res.status(200).send(`Webhook do tipo ${eventType} ignorado.`);
 
     } catch (error) {
-        console.error('Erro no webhook:', error);
+        console.error(`Erro processando webhook para a chamada ${callData.id}:`, error);
         res.status(500).send('Erro interno.');
     }
 });
+// =================== FIM DA CORREÇÃO ===================
 
+
+// O endpoint de relatórios não precisa de nenhuma alteração
 app.get('/reports', async (req, res) => {
     const { period, date } = req.query;
     const periodMap = { daily: 'day', weekly: 'week', monthly: 'month' };
@@ -162,7 +194,6 @@ app.get('/reports', async (req, res) => {
     }
 });
 
-// ================== INÍCIO DA TRADUÇÃO ==================
 function generateReportHtml(data, period, date) {
     let html = `
         <!DOCTYPE html>
@@ -219,9 +250,8 @@ function generateReportHtml(data, period, date) {
     `;
     return html;
 }
-// =================== FIM DA TRADUÇÃO ===================
 
-app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.1 - EN) is running!'));
+app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.2 - Corrected Logic) is running!'));
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
     initializeDatabase();
