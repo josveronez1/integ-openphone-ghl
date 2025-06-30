@@ -1,4 +1,4 @@
-// server.js - v3.3 Final - Criação de Notas e Relatórios
+// server.js - v3.4 com Relatórios Filtrados por Cliente
 const express = require('express');
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
@@ -89,22 +89,14 @@ app.post('/openphone-webhook', async (req, res) => {
             const duration = mediaData.duration || 0;
             const recordingUrl = mediaData.url || null;
 
-            // ================== INÍCIO DA CORREÇÃO ==================
-            // PASSO 1: Criar a nota no GHL (a parte que estava faltando)
             const noteBody = `Call Completed via OpenPhone.\n\nDuration: ${Math.round(duration)} seconds.\nRecording: ${recordingUrl || 'N/A'}`;
             await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}/notes`, {
                 method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${apiKeyForThisCall}`,
-                    'Content-Type': 'application/json',
-                    'Version': '2021-07-28'
-                },
+                headers: { 'Authorization': `Bearer ${apiKeyForThisCall}`, 'Content-Type': 'application/json', 'Version': '2021-07-28' },
                 body: JSON.stringify({ body: noteBody })
             });
             console.log(`Nota da chamada ${callData.id} criada no GHL para o contato ${contactId}.`);
-            // =================== FIM DA CORREÇÃO ====================
 
-            // PASSO 2: Atualizar o registro no nosso banco de dados
             const updateQuery = `
                 UPDATE calls
                 SET duration = $1, recording_url = $2, was_answered = true
@@ -115,18 +107,19 @@ app.post('/openphone-webhook', async (req, res) => {
             console.log(`Gravação da chamada ${callData.id} atualizada no banco de dados.`);
             return res.status(200).send('Evento call.recording.completed processado e nota criada.');
         }
-
         res.status(200).send(`Webhook do tipo ${eventType} ignorado.`);
-
     } catch (error) {
         console.error(`Erro processando webhook para a chamada ${callData.id}:`, error);
         res.status(500).send('Erro interno.');
     }
 });
 
-// O endpoint de relatórios não precisa de nenhuma alteração
+
 app.get('/reports', async (req, res) => {
-    const { period, date } = req.query;
+    // ================== INÍCIO DA ATUALIZAÇÃO ==================
+    const { period, date, account: accountId } = req.query; // Novo parâmetro: accountId
+    // =================== FIM DA ATUALIZAÇÃO ====================
+
     const periodMap = { daily: 'day', weekly: 'week', monthly: 'month' };
     const sqlIntervalUnit = periodMap[period];
 
@@ -135,28 +128,37 @@ app.get('/reports', async (req, res) => {
     }
 
     try {
-        const callsQuery = `
+        let callsQuery = `
             SELECT * FROM calls
             WHERE call_time::date >= date_trunc('${sqlIntervalUnit}', $1::date)
               AND call_time::date < date_trunc('${sqlIntervalUnit}', $1::date) + '1 ${sqlIntervalUnit}'::interval;
         `;
-        const { rows: calls } = await pool.query(callsQuery, [date]);
+        let { rows: allCalls } = await pool.query(callsQuery, [date]);
+
+        let reportTitle = 'Call Report (All Accounts)';
+        let filteredCalls = allCalls;
+
+        // ================== INÍCIO DA ATUALIZAÇÃO ==================
+        // Filtra as chamadas se um 'accountId' for fornecido
+        if (accountId) {
+            const tenantsForAccount = TENANT_CONFIG.filter(t => t.id === accountId);
+            if (tenantsForAccount.length === 0) {
+                return res.status(404).send('Account ID not found.');
+            }
+            const ghlApiKeysForAccount = tenantsForAccount.map(t => t.ghlApiKey);
+            filteredCalls = allCalls.filter(c => ghlApiKeysForAccount.includes(c.ghl_api_key));
+            reportTitle = `Call Report: ${tenantsForAccount[0].name}`;
+        }
+        // =================== FIM DA ATUALIZAÇÃO ====================
 
         const reportData = {};
-
-        for (const call of calls) {
+        for (const call of filteredCalls) { // Usa as chamadas filtradas
             const tenant = TENANT_CONFIG.find(t => t.ghlApiKey === call.ghl_api_key);
             if (!tenant) continue;
-
-            if (!reportData[tenant.name]) {
-                reportData[tenant.name] = {};
-            }
+            if (!reportData[tenant.name]) { reportData[tenant.name] = {}; }
             if (!reportData[tenant.name][call.phone_number_from]) {
                 reportData[tenant.name][call.phone_number_from] = {
-                    totalCalls: 0,
-                    answeredCalls: 0,
-                    scheduledMeetings: 0,
-                    contactsWithMeetings: new Set()
+                    totalCalls: 0, answeredCalls: 0, scheduledMeetings: 0, contactsWithMeetings: new Set()
                 };
             }
             reportData[tenant.name][call.phone_number_from].totalCalls++;
@@ -164,16 +166,13 @@ app.get('/reports', async (req, res) => {
                 reportData[tenant.name][call.phone_number_from].answeredCalls++;
             }
         }
-
-        const uniqueContacts = [...new Set(calls.map(c => c.contact_id))];
+        const uniqueContacts = [...new Set(filteredCalls.map(c => c.contact_id))];
         for (const contactId of uniqueContacts) {
-            const callForContact = calls.find(c => c.contact_id === contactId);
+            const callForContact = filteredCalls.find(c => c.contact_id === contactId);
             const tenant = TENANT_CONFIG.find(t => t.ghlApiKey === callForContact.ghl_api_key);
             if (!tenant) continue;
-
             const callDate = new Date(callForContact.call_time).toISOString().split('T')[0];
             const expectedTag = `reuniao-agendada-${callDate}`;
-
             const contactDetailsResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}`, {
                 headers: { 'Authorization': `Bearer ${tenant.ghlApiKey}` }
             });
@@ -186,43 +185,33 @@ app.get('/reports', async (req, res) => {
                 }
             }
         }
-
-        res.send(generateReportHtml(reportData, period, date));
-
+        res.send(generateReportHtml(reportData, period, date, reportTitle));
     } catch (error) {
         console.error('Erro ao gerar relatório:', error);
         res.status(500).send(`<h1>Error generating report</h1><p>${error.message}</p>`);
     }
 });
 
-function generateReportHtml(data, period, date) {
+function generateReportHtml(data, period, date, reportTitle) {
     let html = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Call Report</title>
-            <style>
-                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; }
-                .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
-                h1 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
-                h2 { color: #34495e; background-color: #ecf0f1; padding: 12px; border-radius: 5px; margin-top: 40px; }
-                .report-section { margin-top: 20px; border: 1px solid #ddd; border-radius: 5px; padding: 20px; }
-                .phone-number { font-weight: bold; font-size: 1.1em; color: #2980b9; }
-                ul { list-style-type: none; padding-left: 0; }
-                li { background-color: #fdfdfd; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
-                li:last-child { border-bottom: none; }
-                .metric-label { font-weight: 500; }
-                .metric-value { font-weight: bold; font-size: 1.2em; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 20px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>Call Report</h1>
-                <p><strong>Period:</strong> ${period.charAt(0).toUpperCase() + period.slice(1)} | <strong>Reference Date:</strong> ${date}</p>
+        <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>${reportTitle}</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; }
+            .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+            h1 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
+            h2 { color: #34495e; background-color: #ecf0f1; padding: 12px; border-radius: 5px; margin-top: 40px; }
+            .report-section { margin-top: 20px; border: 1px solid #ddd; border-radius: 5px; padding: 20px; }
+            .phone-number { font-weight: bold; font-size: 1.1em; color: #2980b9; }
+            ul { list-style-type: none; padding-left: 0; }
+            li { background-color: #fdfdfd; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+            li:last-child { border-bottom: none; }
+            .metric-label { font-weight: 500; }
+            .metric-value { font-weight: bold; font-size: 1.2em; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 20px; }
+        </style></head><body><div class="container">
+        <h1>${reportTitle}</h1>
+        <p><strong>Period:</strong> ${period.charAt(0).toUpperCase() + period.slice(1)} | <strong>Reference Date:</strong> ${date}</p>
     `;
-
     if (Object.keys(data).length === 0) {
         html += '<p>No data found for this period.</p>';
     } else {
@@ -243,16 +232,11 @@ function generateReportHtml(data, period, date) {
             }
         }
     }
-
-    html += `
-            </div>
-        </body>
-        </html>
-    `;
+    html += `</div></body></html>`;
     return html;
 }
 
-app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.3 - Final) is running!'));
+app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.4 - Filtered) is running!'));
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
     initializeDatabase();
