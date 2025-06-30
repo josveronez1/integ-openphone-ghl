@@ -1,4 +1,4 @@
-// server.js - Versão Multi-Tenant para GHL e OpenPhone
+// server.js - Versão Multi-Tenant com LOGS DE DEBUG APRIMORADOS
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
@@ -10,29 +10,27 @@ app.use(cors());
 app.use(express.json());
 
 // --- CONFIGURAÇÃO MULTI-TENANT ---
-// O mapa que associa um número OpenPhone a uma GHL API Key.
-// Será carregado a partir das variáveis de ambiente do nosso servidor online (Render).
-const GHL_API_KEY_MAP = process.env.GHL_API_KEY_MAP_JSON 
-    ? JSON.parse(process.env.GHL_API_KEY_MAP_JSON) 
-    : {};
+const GHL_API_KEY_MAP_JSON = process.env.GHL_API_KEY_MAP_JSON || '{}';
+const GHL_API_KEY_MAP = JSON.parse(GHL_API_KEY_MAP_JSON);
 
 // ROTA DO WEBHOOK PARA O OPENPHONE
 app.post('/openphone-webhook', async (req, res) => {
-    console.log('--- OpenPhone Webhook Recebido (Lógica Multi-Tenant) ---');
+    console.log('--- OpenPhone Webhook Recebido (DEBUG MODE) ---');
+    console.log('Corpo completo do webhook:', JSON.stringify(req.body, null, 2)); // DEBUG: Mostra tudo que recebemos
 
     if (Object.keys(GHL_API_KEY_MAP).length === 0) {
-        console.error('[ERRO DE CONFIGURAÇÃO] O mapa de API Keys (GHL_API_KEY_MAP_JSON) não está configurado no servidor.');
+        console.error('[ERRO DE CONFIGURAÇÃO] O mapa de API Keys (GHL_API_KEY_MAP_JSON) está vazio ou não foi configurado.');
         return res.status(500).send('Erro de configuração do servidor.');
     }
+    console.log('[DEBUG] Mapa de API Keys carregado com sucesso.');
 
     const eventType = req.body.type;
     const callData = req.body.data?.object;
 
     if (eventType !== 'call.recording.ready' || !callData) {
-        return res.status(200).send('Webhook ignorado (não é uma chamada finalizada com gravação).');
+        return res.status(200).send('Webhook ignorado (não é call.recording.ready).');
     }
 
-    // 1. IDENTIFICAR O NÚMERO INTERNO (OPENPHONE) E A API KEY CORRETA
     let userOpenPhoneNumber;
     let apiKeyForThisCall;
 
@@ -44,60 +42,66 @@ app.post('/openphone-webhook', async (req, res) => {
         apiKeyForThisCall = GHL_API_KEY_MAP[callData.to];
     }
 
+    console.log(`[DEBUG] Tentando rotear. From: ${callData.from}, To: ${callData.to}`);
+
     if (!apiKeyForThisCall) {
-        console.warn(`[ROTEAMENTO FALHOU] Nenhum dos números da chamada (${callData.from}, ${callData.to}) corresponde a uma API Key configurada.`);
-        return res.status(200).send('Número de origem/destino não encontrado no mapa de roteamento.');
+        console.warn(`[ROTEAMENTO FALHOU] Nenhum dos números da chamada corresponde a uma API Key.`);
+        console.warn('[DEBUG] Chaves do mapa configurado:', Object.keys(GHL_API_KEY_MAP));
+        return res.status(200).send('Número não encontrado no mapa de roteamento.');
     }
     
-    console.log(`[ROTEAMENTO OK] Chamada do número ${userOpenPhoneNumber} será registrada na sub-conta GHL correspondente.`);
+    console.log(`[ROTEAMENTO OK] Número OpenPhone identificado: ${userOpenPhoneNumber}. A API Key será usada.`);
 
-    // 2. IDENTIFICAR O NÚMERO DO CLIENTE E DADOS DA CHAMADA
     const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
     const duration = callData.duration;
     const recordingUrl = callData.recordingUrl;
     const formattedPhoneNumber = `+${contactPhoneNumber.replace(/\D/g, '')}`;
 
+    console.log(`[DEBUG] Buscando contato no GHL com o número: ${formattedPhoneNumber}`);
+
     try {
-        // 3. USAR A API KEY CORRETA PARA BUSCAR O CONTATO NO GHL
         const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(formattedPhoneNumber)}`, {
             headers: { 'Authorization': `Bearer ${apiKeyForThisCall}` }
         });
-
-        if (!searchResponse.ok) throw new Error(`Falha ao buscar contato no GHL. Status: ${searchResponse.status}`);
         
-        const searchData = await searchResponse.json();
+        const responseText = await searchResponse.text(); // Lê como texto para debug
+        if (!searchResponse.ok) {
+            console.error(`[ERRO GHL LOOKUP] Status: ${searchResponse.status}. Resposta: ${responseText}`);
+            throw new Error(`Falha ao buscar contato no GHL.`);
+        }
+        
+        const searchData = JSON.parse(responseText);
         if (searchData.contacts.length === 0) {
-            console.log(`[Webhook] Contato ${formattedPhoneNumber} não encontrado na sub-conta GHL correspondente.`);
-            return res.status(200).send('Contato não encontrado no GHL.');
+            console.log(`[Webhook] Contato ${formattedPhoneNumber} não encontrado na sub-conta GHL.`);
+            return res.status(200).send('Contato não encontrado.');
         }
 
         const contactId = searchData.contacts[0].id;
         console.log(`[Webhook] Contato encontrado. ID: ${contactId}.`);
 
-        // 4. USAR A API KEY CORRETA PARA CRIAR A NOTA
         const noteBody = `Chamada via OpenPhone Concluída.\n\nDuração: ${Math.round(duration)} segundos.\nGravação: ${recordingUrl || 'N/A'}`;
-        
-        await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}/notes`, {
+        console.log(`[DEBUG] Corpo da nota a ser criada: "${noteBody}"`);
+
+        const noteResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}/notes`, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKeyForThisCall}`,
-                'Content-Type': 'application/json',
-                'Version': '2021-07-28'
-            },
+            headers: { 'Authorization': `Bearer ${apiKeyForThisCall}`, 'Content-Type': 'application/json', 'Version': '2021-07-28' },
             body: JSON.stringify({ body: noteBody })
         });
+        
+        const noteResponseText = await noteResponse.text();
+        if (!noteResponse.ok) {
+            console.error(`[ERRO GHL NOTE] Status: ${noteResponse.status}. Resposta: ${noteResponseText}`);
+            throw new Error('Falha ao criar nota no GHL.');
+        }
 
-        console.log(`✅ [SUCESSO] Nota criada para o contato ${contactId} na sub-conta correta.`);
+        console.log(`✅ [SUCESSO] Nota criada para o contato ${contactId}.`);
         res.status(200).send('Webhook processado e nota criada.');
 
     } catch (error) {
-        console.error('[ERRO NO PROCESSAMENTO] Erro ao processar o webhook multi-tenant:', error.message);
+        console.error('[ERRO NO PROCESSAMENTO]', error.message);
         res.status(500).send('Erro ao processar o webhook.');
     }
 });
 
-app.get('/', (req, res) => {
-  res.status(200).send('Servidor da Integração GHL-OpenPhone (Multi-Tenant) está no ar!');
-});
-
-app.listen(port, () => console.log(`Servidor Multi-Tenant rodando na porta ${port}`));
+app.get('/', (req, res) => res.status(200).send('Servidor GHL-OpenPhone (DEBUG MODE) está no ar!'));
+app.listen(port, () => console.log(`Servidor Multi-Tenant (DEBUG MODE) rodando na porta ${port}`));
