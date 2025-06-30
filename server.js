@@ -1,36 +1,59 @@
-// server.js - Versão Multi-Tenant com CORREÇÃO FINAL
+// server.js - v2.0 com Banco de Dados e Relatórios
 const express = require('express');
 const fetch = require('node-fetch');
-const cors = require('cors');
+const { Pool } = require('pg'); // Nova dependência do banco de dados
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors());
+// --- CONFIGURAÇÃO DO BANCO DE DADOS ---
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false } // Necessário para conexões na Render
+});
+
+// Função para criar a tabela de chamadas se ela não existir
+const initializeDatabase = async () => {
+    const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS calls (
+            id SERIAL PRIMARY KEY,
+            call_id VARCHAR(255) UNIQUE,
+            contact_id VARCHAR(255),
+            ghl_api_key VARCHAR(255),
+            call_time TIMESTAMPTZ,
+            duration INT,
+            was_answered BOOLEAN,
+            recording_url TEXT
+        );
+    `;
+    try {
+        await pool.query(createTableQuery);
+        console.log('Tabela "calls" verificada/criada com sucesso.');
+    } catch (err) {
+        console.error('Erro ao inicializar o banco de dados:', err);
+    }
+};
+
+// --- LÓGICA MULTI-TENANT (EXISTENTE) ---
+const TENANT_CONFIG_JSON = process.env.TENANT_CONFIG_JSON || '[]';
+const TENANT_CONFIG = JSON.parse(TENANT_CONFIG_JSON);
+const GHL_API_KEY_MAP = {};
+TENANT_CONFIG.forEach(tenant => {
+    GHL_API_KEY_MAP[tenant.openPhoneNumber] = tenant.ghlApiKey;
+});
+
 app.use(express.json());
 
-const GHL_API_KEY_MAP_JSON = process.env.GHL_API_KEY_MAP_JSON || '{}';
-const GHL_API_KEY_MAP = JSON.parse(GHL_API_KEY_MAP_JSON);
-
+// --- ENDPOINT DO WEBHOOK (MODIFICADO) ---
 app.post('/openphone-webhook', async (req, res) => {
-    console.log('--- OpenPhone Webhook Recebido (v1.1) ---');
-    
-    if (Object.keys(GHL_API_KEY_MAP).length === 0) {
-        console.error('[ERRO DE CONFIGURAÇÃO] O mapa de API Keys (GHL_API_KEY_MAP_JSON) está vazio.');
-        return res.status(500).send('Erro de configuração do servidor.');
-    }
-    
     const eventType = req.body.type;
     const callData = req.body.data?.object;
 
     if (eventType !== 'call.recording.completed' || !callData) {
-        return res.status(200).send(`Webhook ignorado (tipo: ${eventType}). Processamos apenas 'call.recording.completed'.`);
+        return res.status(200).send('Webhook ignorado.');
     }
 
-    console.log('[INFO] Processando evento call.recording.completed...');
-
     let userOpenPhoneNumber, apiKeyForThisCall;
-
     if (GHL_API_KEY_MAP[callData.from]) {
         userOpenPhoneNumber = callData.from;
         apiKeyForThisCall = GHL_API_KEY_MAP[callData.from];
@@ -39,61 +62,101 @@ app.post('/openphone-webhook', async (req, res) => {
         apiKeyForThisCall = GHL_API_KEY_MAP[callData.to];
     }
 
-    if (!apiKeyForThisCall) {
-        console.warn(`[ROTEAMENTO FALHOU] Nenhum dos números da chamada (${callData.from}, ${callData.to}) corresponde a uma API Key.`);
-        return res.status(200).send('Número não encontrado no mapa de roteamento.');
-    }
-    
-    console.log(`[ROTEAMENTO OK] Chamada do número ${userOpenPhoneNumber} será registrada na sub-conta GHL correta.`);
-
-    // ================== INÍCIO DA CORREÇÃO ==================
-    // Os dados de mídia vêm dentro de um array. Precisamos acessá-lo.
-    const mediaData = callData.media && callData.media.length > 0 ? callData.media[0] : {};
-    const duration = mediaData.duration || 0; // Pega a duração do objeto de mídia, ou 0 se não houver
-    const recordingUrl = mediaData.url || ''; // Pega o URL do objeto de mídia, ou string vazia
-    // =================== FIM DA CORREÇÃO ====================
-
-    const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
-    const formattedPhoneNumber = `+${contactPhoneNumber.replace(/\D/g, '')}`;
-    
-    console.log(`[INFO] Buscando contato no GHL com o número: ${formattedPhoneNumber}`);
+    if (!apiKeyForThisCall) return res.status(200).send('Roteamento falhou.');
 
     try {
-        const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(formattedPhoneNumber)}`, {
+        const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
+        const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(`+${contactPhoneNumber.replace(/\D/g, '')}`)}`, {
             headers: { 'Authorization': `Bearer ${apiKeyForThisCall}` }
         });
-        
-        const responseText = await searchResponse.text();
-        if (!searchResponse.ok) throw new Error(`Falha ao buscar contato no GHL. Status: ${searchResponse.status}. Resposta: ${responseText}`);
-        
-        const searchData = JSON.parse(responseText);
-        if (searchData.contacts.length === 0) {
-            console.log(`[INFO] Contato ${formattedPhoneNumber} não encontrado na sub-conta GHL.`);
-            return res.status(200).send('Contato não encontrado.');
-        }
+        const searchData = await searchResponse.json();
+        if (searchData.contacts.length === 0) return res.status(200).send('Contato não encontrado no GHL.');
 
         const contactId = searchData.contacts[0].id;
-        console.log(`[INFO] Contato encontrado. ID: ${contactId}.`);
+        const mediaData = callData.media && callData.media.length > 0 ? callData.media[0] : {};
 
-        const noteBody = `Chamada via OpenPhone Concluída.\n\nDuração: ${Math.round(duration)} segundos.\nGravação: ${recordingUrl || 'N/A'}`;
-        console.log(`[INFO] Criando nota para o contato ${contactId}.`);
-
-        const noteResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}/notes`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${apiKeyForThisCall}`, 'Content-Type': 'application/json', 'Version': '2021-07-28' },
-            body: JSON.stringify({ body: noteBody })
-        });
-        
-        if (!noteResponse.ok) throw new Error(`Falha ao criar nota no GHL. Status: ${noteResponse.status}. Resposta: ${await noteResponse.text()}`);
-
-        console.log(`✅ [SUCESSO] Nota criada para o contato ${contactId}.`);
-        res.status(200).send('Webhook processado e nota criada.');
+        // Salvar no banco de dados
+        const insertQuery = `
+            INSERT INTO calls (call_id, contact_id, ghl_api_key, call_time, duration, was_answered, recording_url)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (call_id) DO NOTHING;
+        `;
+        const values = [
+            callData.id,
+            contactId,
+            apiKeyForThisCall,
+            callData.createdAt,
+            mediaData.duration || 0,
+            !!callData.answeredAt, // Converte para booleano: true se answeredAt existir
+            mediaData.url || null
+        ];
+        await pool.query(insertQuery, values);
+        console.log(`Chamada ${callData.id} salva no banco de dados.`);
+        res.status(200).send('Chamada processada e salva.');
 
     } catch (error) {
-        console.error('[ERRO NO PROCESSAMENTO]', error.message);
-        res.status(500).send('Erro ao processar o webhook.');
+        console.error('Erro no webhook:', error);
+        res.status(500).send('Erro interno.');
     }
 });
 
-app.get('/', (req, res) => res.status(200).send('Servidor GHL-OpenPhone (v1.1 - CORRIGIDO) está no ar!'));
-app.listen(port, () => console.log(`Servidor Multi-Tenant (v1.1 - CORRIGIDO) rodando na porta ${port}`));
+// --- NOVOS ENDPOINTS DE RELATÓRIO ---
+app.get('/reports', async (req, res) => {
+    const { period, date } = req.query; // ex: /reports?period=daily&date=2025-06-30
+
+    if (!['daily', 'weekly', 'monthly'].includes(period) || !date) {
+        return res.status(400).send('Parâmetros "period" (daily, weekly, monthly) e "date" (YYYY-MM-DD) são necessários.');
+    }
+
+    try {
+        // 1. Obter as chamadas do período
+        const callsQuery = `
+            SELECT * FROM calls
+            WHERE call_time::date >= date_trunc('${period}', $1::date)
+              AND call_time::date < date_trunc('${period}', $1::date) + '1 ${period}'::interval;
+        `;
+        const { rows: calls } = await pool.query(callsQuery, [date]);
+
+        // 2. Contar as métricas
+        let totalCalls = calls.length;
+        let answeredCalls = calls.filter(c => c.was_answered).length;
+        let scheduledMeetings = 0;
+
+        // 3. Verificar reuniões marcadas (chamadas à API do GHL)
+        const uniqueContacts = [...new Set(calls.map(c => c.contact_id))];
+        for (const contactId of uniqueContacts) {
+            const callForContact = calls.find(c => c.contact_id === contactId);
+            const ghlApiKey = callForContact.ghl_api_key;
+            const callDate = new Date(callForContact.call_time).toISOString().split('T')[0];
+            const expectedTag = `reuniao-agendada-${callDate}`;
+
+            const contactDetailsResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/${contactId}`, {
+                headers: { 'Authorization': `Bearer ${ghlApiKey}` }
+            });
+            const contactDetails = await contactDetailsResponse.json();
+            if (contactDetails.contact.tags.includes(expectedTag)) {
+                scheduledMeetings++;
+            }
+        }
+
+        res.json({
+            period,
+            date,
+            totalCalls,
+            answeredCalls,
+            scheduledMeetings
+        });
+
+    } catch (error) {
+        console.error('Erro ao gerar relatório:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+// --- INICIALIZAÇÃO ---
+app.get('/', (req, res) => res.status(200).send('Servidor de Relatórios GHL-OpenPhone no ar!'));
+app.listen(port, () => {
+    console.log(`Servidor rodando na porta ${port}`);
+    initializeDatabase();
+});
