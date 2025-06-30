@@ -1,4 +1,4 @@
-// server.js - v5.0 Final com Páginas de Relatório Dedicadas por Cliente
+// server.js - v5.1 Corrigindo o bug 'data is not defined'
 const express = require('express');
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
@@ -107,7 +107,7 @@ async function getReportData(period, date, accountId = null) {
             filteredCalls = allCalls.filter(c => ghlApiKeysForAccount.includes(c.ghl_api_key));
             accountName = tenantsForAccount[0].name;
         } else {
-            filteredCalls = []; // Se o ID da conta não for encontrado, não mostre nenhum dado
+            filteredCalls = [];
         }
     }
     const reportData = {};
@@ -143,12 +143,11 @@ async function getReportData(period, date, accountId = null) {
     return { reportData, accountName };
 }
 
-// --- GERAÇÃO DE HTML (sem alterações) ---
+// --- GERAÇÃO DE HTML (COM A CORREÇÃO) ---
 function generateHtmlShell(pageTitle, content) {
-    return `
-        <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${pageTitle}</title>
-        <style> body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; } .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); } h1, h3 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; } h2 { color: #34495e; background-color: #ecf0f1; padding: 12px; border-radius: 5px; margin-top: 40px; } .report-block { margin-bottom: 40px; } .report-section { margin-top: 20px; border: 1px solid #ddd; border-radius: 5px; padding: 20px; } .phone-number { font-weight: bold; font-size: 1.1em; color: #2980b9; } ul { list-style-type: none; padding-left: 0; } li { background-color: #fdfdfd; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; } .metric-label { font-weight: 500; } .metric-value { font-weight: bold; font-size: 1.2em; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 20px; } .date-picker-container { margin: 20px 0; padding: 15px; background: #e8f0fe; border: 1px solid #d6e3f4; border-radius: 5px; text-align: center; } .date-picker-container label { font-weight: bold; margin-right: 10px; } input[type="date"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; } </style></head><body><div class="container">${content}</div></body></html>`;
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${pageTitle}</title><style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; } .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); } h1, h3 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; } h2 { color: #34495e; background-color: #ecf0f1; padding: 12px; border-radius: 5px; margin-top: 40px; } .report-block { margin-bottom: 40px; } .report-section { margin-top: 20px; border: 1px solid #ddd; border-radius: 5px; padding: 20px; } .phone-number { font-weight: bold; font-size: 1.1em; color: #2980b9; } ul { list-style-type: none; padding-left: 0; } li { background-color: #fdfdfd; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; } .metric-label { font-weight: 500; } .metric-value { font-weight: bold; font-size: 1.2em; color: #2c3e50; background-color: #ecf0f1; padding: 5px 10px; border-radius: 20px; } .date-picker-container { margin: 20px 0; padding: 15px; background: #e8f0fe; border: 1px solid #d6e3f4; border-radius: 5px; text-align: center; } .date-picker-container label { font-weight: bold; margin-right: 10px; } input[type="date"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; } </style></head><body><div class="container">${content}</div></body></html>`;
 }
+
 function generateReportBlockHtml(reportData) {
     let blockHtml = '';
     if (Object.keys(reportData).length === 0) {
@@ -156,8 +155,11 @@ function generateReportBlockHtml(reportData) {
     } else {
         for (const accountName in reportData) {
             blockHtml += `<h2>${accountName}</h2>`;
+            // ================== INÍCIO DA CORREÇÃO ==================
+            // A variável aqui deve ser 'reportData', e não 'data'.
             for (const phoneNumber in reportData[accountName]) {
-                const stats = data[accountName][phoneNumber];
+                const stats = reportData[accountName][phoneNumber];
+            // =================== FIM DA CORREÇÃO ====================
                 blockHtml += `<div class="report-section"><p class="phone-number">Phone Number: ${phoneNumber}</p><ul>
                     <li><span class="metric-label">Total Calls Made:</span> <span class="metric-value">${stats.totalCalls}</span></li>
                     <li><span class="metric-label">Answered Calls:</span> <span class="metric-value">${stats.answeredCalls}</span></li>
@@ -170,32 +172,22 @@ function generateReportBlockHtml(reportData) {
 }
 
 
-// ================== INÍCIO DA ATUALIZAÇÃO ==================
-
-// --- NOVAS ROTAS DEDICADAS POR CLIENTE ---
-
-// Rota para o dashboard de um cliente específico (ex: /mondia)
+// --- ROTAS DO DASHBOARD (sem alterações) ---
 app.get('/:accountId', (req, res) => {
     const { accountId } = req.params;
-    // Redireciona de /mondia para /mondia/dashboard para manter a lógica
     res.redirect(`/${accountId}/dashboard`);
 });
 
-// Rota para o dashboard principal de um cliente
 app.get('/:accountId/dashboard', async (req, res) => {
     try {
         const { accountId } = req.params;
         const tenantInfo = TENANT_CONFIG.find(t => t.id === accountId);
         if (!tenantInfo) return res.status(404).send('Account not found.');
-
         const today = new Date().toISOString().split('T')[0];
-
         const daily = await getReportData('daily', today, accountId);
         const weekly = await getReportData('weekly', today, accountId);
         const monthly = await getReportData('monthly', today, accountId);
-        
         const pageTitle = `${tenantInfo.name} - Dashboard`;
-
         let htmlContent = `
             <h1>${pageTitle}</h1>
             <div class="date-picker-container">
@@ -203,12 +195,11 @@ app.get('/:accountId/dashboard', async (req, res) => {
                 <input type="date" id="report-date">
             </div>
             <div class="report-block"><h3>Today's Report</h3>${generateReportBlockHtml(daily.reportData)}</div>
-            <div class.report-block"><h3>This Week's Report</h3>${generateReportBlockHtml(weekly.reportData)}</div>
+            <div class="report-block"><h3>This Week's Report</h3>${generateReportBlockHtml(weekly.reportData)}</div>
             <div class="report-block"><h3>This Month's Report</h3>${generateReportBlockHtml(monthly.reportData)}</div>
             <script>
                 document.getElementById('report-date').addEventListener('change', function() {
                     if (this.value) {
-                        // Constrói a URL para o relatório diário específico do cliente
                         window.location.href = '/${accountId}/reports?period=daily&date=' + this.value;
                     }
                 });
@@ -220,16 +211,13 @@ app.get('/:accountId/dashboard', async (req, res) => {
     }
 });
 
-// Rota para o relatório de data específica de um cliente
 app.get('/:accountId/reports', async (req, res) => {
     try {
         const { accountId } = req.params;
         const { period, date } = req.query;
         if (!period || !date) return res.status(400).send('Parameters "period" and "date" are required.');
-
         const { reportData, accountName } = await getReportData(period, date, accountId);
         const pageTitle = `${accountName} - Report for ${date}`;
-        
         let htmlContent = `
             <h1>${pageTitle}</h1>
             <p><a href="/${accountId}/dashboard">&larr; Back to ${accountName} Dashboard</a></p>
@@ -241,20 +229,12 @@ app.get('/:accountId/reports', async (req, res) => {
     }
 });
 
-
-// A rota raiz agora é apenas uma página de boas-vindas
 app.get('/', (req, res) => {
-    const reportLinks = TENANT_CONFIG.map(t => `<li><a href="/${t.id}">${t.name} Dashboard</a></li>`).filter((v, i, a) => a.indexOf(v) === i);
-    let htmlContent = `
-        <h1>Reporting Server</h1>
-        <p>Please select a client dashboard to view:</p>
-        <ul>${reportLinks.join('')}</ul>
-    `;
+    const uniqueTenants = TENANT_CONFIG.filter((tenant, index, self) => index === self.findIndex((t) => t.id === tenant.id));
+    const reportLinks = uniqueTenants.map(t => `<li><a href="/${t.id}">${t.name} Dashboard</a></li>`);
+    let htmlContent = `<h1>Reporting Server</h1><p>Please select a client dashboard to view:</p><ul>${reportLinks.join('')}</ul>`;
     res.send(generateHtmlShell('Report Server', htmlContent));
 });
-
-// =================== FIM DA ATUALIZAÇÃO ===================
-
 
 // --- INICIALIZAÇÃO ---
 app.listen(port, () => {
