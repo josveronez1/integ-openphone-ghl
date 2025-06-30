@@ -1,4 +1,4 @@
-// server.js - v3.0 com Relatórios HTML por Sub-conta e Número
+// server.js - v3.1 com Relatórios HTML em Inglês
 const express = require('express');
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
@@ -27,7 +27,6 @@ const initializeDatabase = async () => {
     `;
     try {
         await pool.query(createTableQuery);
-        // Adiciona a nova coluna se ela não existir, para não quebrar instalações antigas
         await pool.query('ALTER TABLE calls ADD COLUMN IF NOT EXISTS phone_number_from VARCHAR(255);');
         console.log('Tabela "calls" verificada/criada com sucesso.');
     } catch (err) {
@@ -93,14 +92,13 @@ app.post('/openphone-webhook', async (req, res) => {
     }
 });
 
-// --- ENDPOINT DE RELATÓRIO COM HTML ---
 app.get('/reports', async (req, res) => {
     const { period, date } = req.query;
     const periodMap = { daily: 'day', weekly: 'week', monthly: 'month' };
     const sqlIntervalUnit = periodMap[period];
 
     if (!sqlIntervalUnit || !date) {
-        return res.status(400).send('Parâmetros "period" (daily, weekly, monthly) e "date" (YYYY-MM-DD) são necessários.');
+        return res.status(400).send('Parameters "period" (daily, weekly, monthly) and "date" (YYYY-MM-DD) are required.');
     }
 
     try {
@@ -111,10 +109,8 @@ app.get('/reports', async (req, res) => {
         `;
         const { rows: calls } = await pool.query(callsQuery, [date]);
 
-        // Estrutura para agrupar os dados
         const reportData = {};
 
-        // Processar chamadas para agrupar por sub-conta e número
         for (const call of calls) {
             const tenant = TENANT_CONFIG.find(t => t.ghlApiKey === call.ghl_api_key);
             if (!tenant) continue;
@@ -136,7 +132,6 @@ app.get('/reports', async (req, res) => {
             }
         }
 
-        // Processar reuniões marcadas
         const uniqueContacts = [...new Set(calls.map(c => c.contact_id))];
         for (const contactId of uniqueContacts) {
             const callForContact = calls.find(c => c.contact_id === contactId);
@@ -163,18 +158,19 @@ app.get('/reports', async (req, res) => {
 
     } catch (error) {
         console.error('Erro ao gerar relatório:', error);
-        res.status(500).send(`<h1>Erro ao gerar relatório</h1><p>${error.message}</p>`);
+        res.status(500).send(`<h1>Error generating report</h1><p>${error.message}</p>`);
     }
 });
 
+// ================== INÍCIO DA TRADUÇÃO ==================
 function generateReportHtml(data, period, date) {
     let html = `
         <!DOCTYPE html>
-        <html lang="pt-br">
+        <html lang="en">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Relatório de Ligações</title>
+            <title>Call Report</title>
             <style>
                 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; }
                 .container { max-width: 900px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
@@ -191,12 +187,12 @@ function generateReportHtml(data, period, date) {
         </head>
         <body>
             <div class="container">
-                <h1>Relatório de Ligações</h1>
-                <p><strong>Período:</strong> ${period.charAt(0).toUpperCase() + period.slice(1)} | <strong>Data de Referência:</strong> ${date}</p>
+                <h1>Call Report</h1>
+                <p><strong>Period:</strong> ${period.charAt(0).toUpperCase() + period.slice(1)} | <strong>Reference Date:</strong> ${date}</p>
     `;
 
     if (Object.keys(data).length === 0) {
-        html += '<p>Nenhum dado encontrado para este período.</p>';
+        html += '<p>No data found for this period.</p>';
     } else {
         for (const accountName in data) {
             html += `<h2>${accountName}</h2>`;
@@ -204,11 +200,11 @@ function generateReportHtml(data, period, date) {
                 const stats = data[accountName][phoneNumber];
                 html += `
                     <div class="report-section">
-                        <p class="phone-number">Número: ${phoneNumber}</p>
+                        <p class="phone-number">Phone Number: ${phoneNumber}</p>
                         <ul>
-                            <li><span class="metric-label">Total de Ligações Feitas:</span> <span class="metric-value">${stats.totalCalls}</span></li>
-                            <li><span class="metric-label">Ligações Atendidas:</span> <span class="metric-value">${stats.answeredCalls}</span></li>
-                            <li><span class="metric-label">Reuniões Marcadas:</span> <span class="metric-value">${stats.scheduledMeetings}</span></li>
+                            <li><span class="metric-label">Total Calls Made:</span> <span class="metric-value">${stats.totalCalls}</span></li>
+                            <li><span class="metric-label">Answered Calls:</span> <span class="metric-value">${stats.answeredCalls}</span></li>
+                            <li><span class="metric-label">Meetings Scheduled:</span> <span class="metric-value">${stats.scheduledMeetings}</span></li>
                         </ul>
                     </div>
                 `;
@@ -223,8 +219,9 @@ function generateReportHtml(data, period, date) {
     `;
     return html;
 }
+// =================== FIM DA TRADUÇÃO ===================
 
-app.get('/', (req, res) => res.status(200).send('Servidor de Relatórios GHL-OpenPhone (v3.0 - HTML) no ar!'));
+app.get('/', (req, res) => res.status(200).send('GHL-OpenPhone Report Server (v3.1 - EN) is running!'));
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
     initializeDatabase();
