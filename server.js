@@ -1,18 +1,16 @@
-// server.js - v2.0 com Banco de Dados e Relatórios
+// server.js - v2.1 com Correção no Relatório
 const express = require('express');
 const fetch = require('node-fetch');
-const { Pool } = require('pg'); // Nova dependência do banco de dados
+const { Pool } = require('pg');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS ---
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false } // Necessário para conexões na Render
+    ssl: { rejectUnauthorized: false }
 });
 
-// Função para criar a tabela de chamadas se ela não existir
 const initializeDatabase = async () => {
     const createTableQuery = `
         CREATE TABLE IF NOT EXISTS calls (
@@ -34,7 +32,6 @@ const initializeDatabase = async () => {
     }
 };
 
-// --- LÓGICA MULTI-TENANT (EXISTENTE) ---
 const TENANT_CONFIG_JSON = process.env.TENANT_CONFIG_JSON || '[]';
 const TENANT_CONFIG = JSON.parse(TENANT_CONFIG_JSON);
 const GHL_API_KEY_MAP = {};
@@ -44,7 +41,6 @@ TENANT_CONFIG.forEach(tenant => {
 
 app.use(express.json());
 
-// --- ENDPOINT DO WEBHOOK (MODIFICADO) ---
 app.post('/openphone-webhook', async (req, res) => {
     const eventType = req.body.type;
     const callData = req.body.data?.object;
@@ -63,7 +59,7 @@ app.post('/openphone-webhook', async (req, res) => {
     }
 
     if (!apiKeyForThisCall) return res.status(200).send('Roteamento falhou.');
-
+    
     try {
         const contactPhoneNumber = callData.from === userOpenPhoneNumber ? callData.to : callData.from;
         const searchResponse = await fetch(`https://rest.gohighlevel.com/v1/contacts/lookup?phone=${encodeURIComponent(`+${contactPhoneNumber.replace(/\D/g, '')}`)}`, {
@@ -71,11 +67,10 @@ app.post('/openphone-webhook', async (req, res) => {
         });
         const searchData = await searchResponse.json();
         if (searchData.contacts.length === 0) return res.status(200).send('Contato não encontrado no GHL.');
-
+        
         const contactId = searchData.contacts[0].id;
         const mediaData = callData.media && callData.media.length > 0 ? callData.media[0] : {};
-
-        // Salvar no banco de dados
+        
         const insertQuery = `
             INSERT INTO calls (call_id, contact_id, ghl_api_key, call_time, duration, was_answered, recording_url)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -87,7 +82,7 @@ app.post('/openphone-webhook', async (req, res) => {
             apiKeyForThisCall,
             callData.createdAt,
             mediaData.duration || 0,
-            !!callData.answeredAt, // Converte para booleano: true se answeredAt existir
+            !!callData.answeredAt,
             mediaData.url || null
         ];
         await pool.query(insertQuery, values);
@@ -100,29 +95,37 @@ app.post('/openphone-webhook', async (req, res) => {
     }
 });
 
-// --- NOVOS ENDPOINTS DE RELATÓRIO ---
-app.get('/reports', async (req, res) => {
-    const { period, date } = req.query; // ex: /reports?period=daily&date=2025-06-30
 
-    if (!['daily', 'weekly', 'monthly'].includes(period) || !date) {
+// --- ENDPOINT DE RELATÓRIO (CORRIGIDO) ---
+app.get('/reports', async (req, res) => {
+    const { period, date } = req.query;
+    
+    // ================== INÍCIO DA CORREÇÃO ==================
+    const periodMap = {
+        daily: 'day',
+        weekly: 'week',
+        monthly: 'month'
+    };
+
+    const sqlIntervalUnit = periodMap[period]; // Traduz 'daily' para 'day', etc.
+
+    if (!sqlIntervalUnit || !date) {
         return res.status(400).send('Parâmetros "period" (daily, weekly, monthly) e "date" (YYYY-MM-DD) são necessários.');
     }
+    // =================== FIM DA CORREÇÃO ====================
 
     try {
-        // 1. Obter as chamadas do período
         const callsQuery = `
             SELECT * FROM calls
-            WHERE call_time::date >= date_trunc('${period}', $1::date)
-              AND call_time::date < date_trunc('${period}', $1::date) + '1 ${period}'::interval;
+            WHERE call_time::date >= date_trunc('${sqlIntervalUnit}', $1::date)
+              AND call_time::date < date_trunc('${sqlIntervalUnit}', $1::date) + '1 ${sqlIntervalUnit}'::interval;
         `;
         const { rows: calls } = await pool.query(callsQuery, [date]);
 
-        // 2. Contar as métricas
         let totalCalls = calls.length;
         let answeredCalls = calls.filter(c => c.was_answered).length;
         let scheduledMeetings = 0;
 
-        // 3. Verificar reuniões marcadas (chamadas à API do GHL)
         const uniqueContacts = [...new Set(calls.map(c => c.contact_id))];
         for (const contactId of uniqueContacts) {
             const callForContact = calls.find(c => c.contact_id === contactId);
@@ -134,7 +137,7 @@ app.get('/reports', async (req, res) => {
                 headers: { 'Authorization': `Bearer ${ghlApiKey}` }
             });
             const contactDetails = await contactDetailsResponse.json();
-            if (contactDetails.contact.tags.includes(expectedTag)) {
+            if (contactDetails.contact && contactDetails.contact.tags.includes(expectedTag)) {
                 scheduledMeetings++;
             }
         }
@@ -153,9 +156,7 @@ app.get('/reports', async (req, res) => {
     }
 });
 
-
-// --- INICIALIZAÇÃO ---
-app.get('/', (req, res) => res.status(200).send('Servidor de Relatórios GHL-OpenPhone no ar!'));
+app.get('/', (req, res) => res.status(200).send('Servidor de Relatórios GHL-OpenPhone (v2.1 - CORRIGIDO) no ar!'));
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
     initializeDatabase();
